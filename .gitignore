@@ -1,0 +1,37 @@
+# ---- Secrets: NEVER commit ----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ---- Dependencies ----
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# ---- Test / build artifacts ----
+.pytest_cache/
+artifacts/
+.next/
+out/
+dist/
+tsconfig.tsbuildinfo
+.vercel
+.cache/
+
+# ---- Local data (SQLite dev ledger) ----
+data/
+*.db
+*.sqlite3
+
+# ---- Scratch / debug output ----
+verdict_output.txt
+*.log
+gltest.config.yaml.bak
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+desktop.ini
