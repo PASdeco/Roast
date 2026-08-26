@@ -40,11 +40,11 @@ Stored on-chain → read back to the user
 
 | Judge | Question |
 |---|---|
-| 🧑‍💼 Recruiter | Would I take this person seriously professionally? |
-| 📈 Growth Critic | Would I follow this account? |
-| 🔍 Content Critic | Is this person actually saying anything? |
-| 🪞 Profile Critic | Does this profile communicate who they are? |
-| 🔥 Roast Judge | What's the funniest, most obvious weakness here? *(choose violence)* |
+| Recruiter | Would I take this person seriously professionally? |
+| Growth Critic | Would I follow this account? |
+| Content Critic | Is this person actually saying anything? |
+| Profile Critic | Does this profile communicate who they are? |
+| Roast Judge | What's the funniest, most obvious weakness here? *(choose violence)* |
 
 Four judges stay analytical; the Roast Judge is unfiltered Gen-Z internet energy. All roasts target the **profile** (positioning, writing, branding) — never protected personal traits.
 
