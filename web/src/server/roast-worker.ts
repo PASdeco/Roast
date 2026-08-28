@@ -90,6 +90,23 @@ export async function processRoastJob(requestId: string): Promise<void> {
 
   if (current.execution_state !== "submitted" || !current.chain_tx_hash) return;
 
+  // Fast-path duplicate guard: if the roast is already stored on-chain (e.g.
+  // a concurrent request for the same handle won the race), deliver it
+  // immediately without waiting for this tx to finalize. This prevents the
+  // second concurrent tx — which will inevitably revert as "already roasted"
+  // — from being misclassified as a refundable failure.
+  try {
+    if (await juryHasRoast(current.profile)) {
+      const result = await readRoastFromJury(current.profile);
+      if (result && typeof (result as { username?: string }).username === "string") {
+        await saveRoastResult({ requestId, result });
+        return;
+      }
+    }
+  } catch {
+    // has_roast/read transient — fall through to normal tx polling.
+  }
+
   try {
     const tx = await getJuryTransaction(current.chain_tx_hash);
     // Never treat intermediate consensus states as failures — they just mean

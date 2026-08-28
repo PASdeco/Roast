@@ -102,6 +102,14 @@ async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_roasts_execution ON roasts(status, execution_state, lease_until);
     CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON user_sessions(expires_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_tx_hash_lower ON purchases ((LOWER(tx_hash)));
+    -- Strict guard against double-spending the same (user, profile) while
+    -- a roast is still in-flight. Two rapid POSTs that both pass the
+    -- findProcessingRoastForProfile check outside a transaction will now
+    -- collide here: the second INSERT fails with a duplicate-key error
+    -- and the request can be retried as a "reused" response instead of
+    -- creating a second spend + second on-chain tx.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_roasts_user_profile_processing
+      ON roasts (user_id, (LOWER(profile))) WHERE status = 'processing';
   `);
   schemaReady = true;
 }
@@ -482,6 +490,23 @@ export async function reserveRoast(params: {
       if (Number(balanceRow.rows[0].balance) < params.amount) {
         await db.query("ROLLBACK");
         return { ok: false, reason: "insufficient" };
+      }
+      // Atomic in-flight guard: if this user already has a processing roast
+      // for the same profile (case-insensitive), do not spend or insert.
+      // The outer route already checked findProcessingRoastForProfile, but
+      // that check races with concurrent POSTs — this check runs while
+      // holding the user row lock and together with the partial unique
+      // index guarantees the second concurrent transaction collides and can
+      // be returned as a reused job instead of a second spend.
+      const existingProcessing = await db.query(
+        `SELECT id FROM roasts
+         WHERE user_id = $1 AND LOWER(profile) = LOWER($2) AND status = 'processing'
+         LIMIT 1`,
+        [params.userId, params.profile],
+      );
+      if (existingProcessing.rows.length > 0) {
+        await db.query("ROLLBACK");
+        return { ok: false, reason: "duplicate" };
       }
       await db.query(
         `INSERT INTO credit_transactions (user_id, type, amount, reference, metadata)

@@ -65,12 +65,19 @@ export async function GET(request: Request) {
   const mine = await getRoastStatus(user.id, roastId);
 
   if (mine && (mine.status === "refunded" || mine.status === "failed")) {
+    const base = juryFailureMessage(mine.failure_reason);
+    // Be explicit that a refund means the user can safely retry the SAME
+    // handle. The previous wording "Try another profile" implied the
+    // profile was at fault; in reality most failures here are transient
+    // LLM/consensus hiccups that succeed on retry.
+    const suffix =
+      mine.status === "refunded"
+        ? " Your credits were refunded — you can retry this profile or try another."
+        : "";
     return NextResponse.json({
       state: "failed",
       refunded: mine.status === "refunded",
-      error:
-        juryFailureMessage(mine.failure_reason) +
-        (mine.status === "refunded" ? " Your credits were refunded." : ""),
+      error: base + suffix,
       balance: await getBalance(user.id),
     });
   }

@@ -2,7 +2,7 @@
 
 import { Flame, Coins, RefreshCw, Share2, AlertTriangle } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { SiteNavbar } from "@/components/site-navbar";
 import { JuryLoader } from "@/components/roast/jury-loader";
 import { RoastResultView, type RoastResult } from "@/components/roast/roast-result-view";
@@ -30,8 +30,14 @@ function RoastFlow() {
   const [error, setError] = useState<{ message: string; code?: string } | null>(null);
   const [buyOpen, setBuyOpen] = useState(false);
   const [starting, setStarting] = useState(false);
+  // Synchronous in-flight guard — prevents double POST when the user
+  // double-clicks or when the auto-run timer fires while a manual click
+  // is already in flight. React state (starting) alone is async and
+  // cannot serialize two calls that start within the same tick.
+  const inFlightRef = useRef(false);
 
   const startRoast = useCallback(async () => {
+    if (inFlightRef.current) return;
     setError(null);
     const provider = window.ethereum;
 
@@ -46,6 +52,9 @@ function RoastFlow() {
         return;
       }
 
+      // Lock synchronously before any await so a second concurrent call bails.
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       setStarting(true);
 
       // Auth challenge for the roast request.
@@ -140,18 +149,27 @@ function RoastFlow() {
         message: caught instanceof Error ? caught.message : "The roast did not start.",
       });
     } finally {
+      inFlightRef.current = false;
       setStarting(false);
     }
   }, [balance, profileInput, refresh]);
 
   // Auto-run when handed a profile from the landing page.
+  // The guard inside the timer (not just at scheduling time) prevents the
+  // exact double you saw: user clicks "Roast my profile" within 400ms of
+  // the landing-page redirect, so both the manual click and the timer would
+  // fire. The inFlightRef serializes them; the phase checks inside the
+  // callback avoid stale-closure races.
   useEffect(() => {
     if (!initialHandle) return;
-    if (phase !== "input" || starting || result || error) return;
-    const timer = setTimeout(() => void startRoast(), 400);
+    if (phase !== "input" || result || error) return;
+    if (inFlightRef.current || starting) return;
+    const timer = setTimeout(() => {
+      if (phase !== "input" || inFlightRef.current || starting) return;
+      void startRoast();
+    }, 400);
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialHandle]);
+  }, [initialHandle, phase, starting, result, error, startRoast]);
 
   const remaining = Math.max(0, balance - COST);
 
@@ -214,6 +232,20 @@ function RoastFlow() {
             {error.message}
           </p>
           <div className="mt-7 flex flex-wrap justify-center gap-3">
+            {/* Retry the same handle — most "adjourned" failures are transient LLM/consensus hiccups that succeed on retry */}
+            <button
+              type="button"
+              className="btn-roast"
+              disabled={starting}
+              onClick={() => {
+                setError(null);
+                setPhase("input");
+                // Defer to next tick so state settles before the guarded startRoast runs
+                setTimeout(() => void startRoast(), 0);
+              }}
+            >
+              <RefreshCw size={16} /> Retry this profile
+            </button>
             <button type="button" className="btn-ghost" onClick={() => { setPhase("input"); setError(null); }}>
               Try another profile
             </button>

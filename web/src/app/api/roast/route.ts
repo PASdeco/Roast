@@ -126,6 +126,36 @@ export async function POST(request: Request) {
 
   if (!spend.ok) {
     if (spend.reason === "duplicate") {
+      // Two concurrent POSTs raced: the first won the reserve transaction
+      // and the second hit the in-flight guard (either the SELECT check or
+      // the partial unique index). Instead of 409, return the existing
+      // processing job so the client polls the single honest verdict and
+      // the backend does not fire a second on-chain tx.
+      const raced = await findProcessingRoastForProfile(user.id, handle);
+      if (raced) {
+        const sessionToken = randomBytes(24).toString("hex");
+        await createUserSession({
+          userId: user.id,
+          token: sessionToken,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        });
+        const response = NextResponse.json({
+          roastId: raced.id,
+          profile: handle,
+          balance: await getBalance(user.id),
+          pollAfterSeconds: 15,
+          reused: true,
+        });
+        response.cookies.set("roast_session", sessionToken, {
+          httpOnly: true,
+          sameSite: "lax",
+          path: "/",
+          maxAge: 60 * 60 * 24 * 7,
+        });
+        return response;
+      }
+      // Fallback: genuine duplicate requestId (client retried same UUID)
+      // or an unexpected state — treat as idempotent success for that id.
       return NextResponse.json(
         { error: "This roast request was already submitted." },
         { status: 409 },
