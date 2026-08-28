@@ -1,5 +1,31 @@
 import { NextResponse } from "next/server";
-import { getRoastResult, getBalance, getOrCreateUser } from "@/server/ledger";
+import { getRoastResult, getBalance, getRoastStatus } from "@/server/ledger";
+import { sessionUserFromRequest } from "@/server/session";
+import { processRoastJob } from "@/server/roast-worker";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+/** Maps a persisted failure reason onto a specific, honest user message. */
+function juryFailureMessage(failureReason: string | null | undefined): string {
+  const reason = (failureReason || "").toUpperCase();
+  if (reason.includes("VALIDATORS_TIMEOUT") || reason.includes("LEADER_TIMEOUT")) {
+    return "The jury ran out of time before reaching consensus.";
+  }
+  if (reason.includes("NO_MAJORITY") || reason.includes("MAJORITY_DISAGREE") || reason.includes("DISAGREE")) {
+    return "The validators couldn't agree on an evaluation this time.";
+  }
+  if (reason.includes("UNDETERMINED")) {
+    return "The jury couldn't determine this profile reliably this time.";
+  }
+  if (reason.includes("LLM_ERROR") || reason.includes("CANCELED")) {
+    return "The evaluation pipeline failed midway.";
+  }
+  if (reason.includes("DEADLINE") || reason.includes("EXCEEDED")) {
+    return "The jury took longer than allowed for this profile.";
+  }
+  return "The jury couldn't reach a usable evaluation this time.";
+}
 
 /**
  * Roast status polling (blueprint §53): the client asks for the result
@@ -9,13 +35,22 @@ import { getRoastResult, getBalance, getOrCreateUser } from "@/server/ledger";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const roastId = url.searchParams.get("id") || "";
-  const walletAddress = url.searchParams.get("wallet") || "";
 
-  if (!/^[\w-]{36}$/.test(roastId) || !/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
-    return NextResponse.json({ error: "Valid id and wallet required." }, { status: 400 });
+  if (!/^[\w-]{36}$/.test(roastId)) {
+    return NextResponse.json({ error: "Valid roast id required." }, { status: 400 });
   }
 
-  const user = await getOrCreateUser(walletAddress);
+  const user = await sessionUserFromRequest(request);
+  if (!user) {
+    return NextResponse.json({ error: "Sign in with your wallet to view roast status." }, { status: 401 });
+  }
+
+  const initial = await getRoastStatus(user.id, roastId);
+  if (!initial) {
+    return NextResponse.json({ error: "Roast not found." }, { status: 404 });
+  }
+
+  if (initial.status === "processing") await processRoastJob(roastId);
   const record = await getRoastResult(user.id, roastId);
 
   if (record) {
@@ -27,16 +62,14 @@ export async function GET(request: Request) {
   }
 
   // Not completed yet — check whether it failed/refunded.
-  const { listUserRoasts } = await import("@/server/ledger");
-  const all = await listUserRoasts(user.id, 200);
-  const mine = all.find((r) => r.id === roastId);
+  const mine = await getRoastStatus(user.id, roastId);
 
   if (mine && (mine.status === "refunded" || mine.status === "failed")) {
     return NextResponse.json({
       state: "failed",
       refunded: mine.status === "refunded",
       error:
-        "The jury couldn't reach a usable evaluation this time." +
+        juryFailureMessage(mine.failure_reason) +
         (mine.status === "refunded" ? " Your credits were refunded." : ""),
       balance: await getBalance(user.id),
     });

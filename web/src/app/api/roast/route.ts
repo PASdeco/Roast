@@ -1,21 +1,19 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import {
+  createUserSession,
   getOrCreateUser,
   getBalance,
-  getRoastResult,
-  trySpendCredits,
-  saveRoastResult,
-  markRoastFailed,
+  reserveRoast,
 } from "@/server/ledger";
 import { verifyChallenge } from "@/server/wallet-auth";
 import { ROAST_COST_CREDITS } from "@/server/credit-config";
 import { fetchXProfile, normalizeHandle } from "@/server/x-profile";
-import {
-  submitRoastToJury,
-  ProfileNotFoundError,
-  juryConfigured,
-} from "@/server/genlayer-service";
-import { randomUUID } from "node:crypto";
+import { juryConfigured } from "@/server/genlayer-service";
+import { processRoastJob } from "@/server/roast-worker";
+import { randomBytes, randomUUID } from "node:crypto";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 /**
  * Roast submission (blueprint §27/§53): validates, reserves credits,
@@ -85,14 +83,15 @@ export async function POST(request: Request) {
     );
   }
 
-  // Atomic, idempotent credit reservation.
+  // Atomically reserve credits AND persist a durable processing job before
+  // handing anything to asynchronous execution.
   const user = await getOrCreateUser(body.walletAddress);
   const roastRequestId = randomUUID();
-  const spend = await trySpendCredits({
+  const spend = await reserveRoast({
     userId: user.id,
     amount: ROAST_COST_CREDITS,
-    reference: `roast:${roastRequestId}`,
-    metadata: { profile: handle },
+    requestId: roastRequestId,
+    profile: handle,
   });
 
   if (!spend.ok) {
@@ -112,39 +111,28 @@ export async function POST(request: Request) {
     );
   }
 
-  // Fire-and-track: the jury runs in the background; the client polls
-  // /api/roast/status. Errors here are recorded against the roast id.
-  void submitRoastToJury(handle)
-    .then((result) => {
-      void saveRoastResult({
-        userId: user.id,
-        profile: handle,
-        cost: ROAST_COST_CREDITS,
-        requestId: roastRequestId,
-        result,
-      });
-    })
-    .catch(async (error) => {
-      if (error instanceof ProfileNotFoundError) {
-        await markRoastFailed(roastRequestId, false).catch(() => {});
-        return;
-      }
-      // Refund the reserved credits and record the failed attempt.
-      const { recordTransaction } = await import("@/server/ledger");
-      await recordTransaction({
-        userId: user.id,
-        type: "refund",
-        amount: ROAST_COST_CREDITS,
-        reference: `refund:${roastRequestId}`,
-        metadata: { profile: handle, reason: "jury_execution_failed" },
-      }).catch(() => {});
-      await markRoastFailed(roastRequestId, true).catch(() => {});
-    });
+  // The initial submit is bounded. Later status polls and the scheduled
+  // recovery route advance the same persisted job, so a function shutdown
+  // cannot strand a refunded failure as permanently pending.
+  after(() => processRoastJob(roastRequestId));
 
-  return NextResponse.json({
+  const sessionToken = randomBytes(24).toString("hex");
+  await createUserSession({
+    userId: user.id,
+    token: sessionToken,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  });
+  const response = NextResponse.json({
     roastId: roastRequestId,
     profile: handle,
     balance: spend.balance,
     pollAfterSeconds: 15,
   });
+  response.cookies.set("roast_session", sessionToken, {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 7,
+  });
+  return response;
 }

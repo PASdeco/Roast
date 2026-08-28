@@ -10,6 +10,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Valid wallet address required." }, { status: 400 });
   }
 
-  const message = createChallenge(body.walletAddress);
+  const message = await createChallenge(body.walletAddress);
   return NextResponse.json({ message });
 }

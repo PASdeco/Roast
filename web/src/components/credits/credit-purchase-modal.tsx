@@ -2,9 +2,10 @@
 
 import { X, Coins, LoaderCircle, CheckCircle2, AlertTriangle } from "lucide-react";
 import { useCallback, useState } from "react";
+import { createClient } from "genlayer-js";
+import { studionet } from "genlayer-js/chains";
 import { useCredits } from "./credit-provider";
 import { useWallet } from "@/components/wallet/wallet-provider";
-import { ensureStudionet } from "@/components/wallet/network-guard";
 
 interface Package {
   id: string;
@@ -26,7 +27,7 @@ type Stage = "idle" | "signing" | "waiting" | "verifying" | "done" | "error";
  * before credits appear. The frontend never declares success on its own.
  */
 export function CreditPurchaseModal({ onClose }: { onClose: () => void }) {
-  const { refresh } = useCredits();
+  const { refresh, signIn } = useCredits();
   const { address, connect } = useWallet();
   const [selected, setSelected] = useState<Package>(PACKAGES[1]);
   const [stage, setStage] = useState<Stage>("idle");
@@ -59,30 +60,27 @@ export function CreditPurchaseModal({ onClose }: { onClose: () => void }) {
       if (!provider) throw new Error("No wallet installed.");
 
       // CRITICAL SAFETY: force the wallet onto GenLayer studionet BEFORE
-      // any payment. Prevents real ETH being sent on mainnet (chainId
-      // mismatch = the app must refuse to proceed).
+      // any payment via the SDK's own connect flow (it switches or adds
+      // the chain). Prevents real ETH being sent on mainnet.
+      const gvmClient = createClient({
+        chain: studionet,
+        account: wallet as `0x${string}`,
+        provider,
+      });
       try {
-        await ensureStudionet();
+        await gvmClient.connect("studionet");
       } catch (switchError) {
         throw switchError instanceof Error
           ? switchError
           : new Error("Network switch to GenLayer studionet failed.");
       }
 
-      // 1. Auth challenge + signature (proves ownership for the purchase).
-      const challengeResponse = await fetch("/api/auth/challenge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletAddress: wallet }),
-      });
-      const { message: challenge } = (await challengeResponse.json()) as {
-        message?: string;
-      };
-      if (!challenge) throw new Error("Could not start purchase session.");
-      const authSignature = (await provider.request({
-        method: "personal_sign",
-        params: [challenge, wallet],
-      })) as string;
+      // 1. Establish a durable, httpOnly session once. The purchase claim is
+      // retried while the chain finalizes, so it must not consume a one-time
+      // signature on every polling attempt.
+      if (!(await signIn(wallet))) {
+        throw new Error("Wallet authentication was not completed.");
+      }
 
       // 2. Payment transaction: call buy_credits(purchaseId) on the
       //    deployed RoastPayments contract. Contract address + package
@@ -102,42 +100,56 @@ export function CreditPurchaseModal({ onClose }: { onClose: () => void }) {
       if (!genWei) throw new Error("Unknown package.");
 
       const purchaseId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const data = toBuyCreditsCalldata(purchaseId);
 
+      // Payment uses GenLayer-NATIVE encoding signed by the connected
+      // wallet. EVM ABI calldata is not executable by GenVM contracts.
+      // The config endpoint serves hex wei ("0x..."), which BigInt accepts.
       setStage("waiting");
-      const txHash = (await provider.request({
-        method: "eth_sendTransaction",
-        params: [
-          {
-            from: wallet,
-            to: paymentsContract,
-            value: toHexWei(genWei),
-            data,
-          },
-        ],
+      const txHash = (await gvmClient.writeContract({
+        address: paymentsContract as `0x${string}`,
+        functionName: "buy_credits",
+        args: [purchaseId],
+        value: BigInt(genWei),
       })) as string;
 
       // 3. Backend verifies on-chain; frontend never self-declares success.
+      //    Studionet finality can lag a minute or two, so poll the claim
+      //    endpoint until FINALIZED (up to ~3 minutes) instead of failing
+      //    on the first PENDING response.
       setStage("verifying");
-      const verifyResponse = await fetch("/api/credits/purchase", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          txHash,
-          purchaseId,
-          packageId: selected.id,
-          walletAddress: wallet,
-          authMessage: challenge,
-          authSignature,
-        }),
+      const claimBody = JSON.stringify({
+        txHash,
+        purchaseId,
+        packageId: selected.id,
       });
-      const result = (await verifyResponse.json()) as {
-        credited?: number;
-        balance?: number;
-        error?: string;
-      };
-      if (!verifyResponse.ok) {
-        throw new Error(result.error || "Payment verification failed.");
+      let result: { credited?: number; balance?: number; error?: string } = {};
+      let lastError = "Payment verification failed.";
+      const deadline = Date.now() + 3 * 60 * 1000;
+      let attempt = 0;
+      while (Date.now() < deadline) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 10000));
+        attempt += 1;
+        const verifyResponse = await fetch("/api/credits/purchase", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: claimBody,
+        });
+        result = (await verifyResponse.json()) as typeof result;
+        if (verifyResponse.ok) {
+          lastError = "";
+          break;
+        }
+        lastError = result.error || lastError;
+        // Only a still-pending tx is worth retrying; anything else is fatal.
+        if (!/PENDING|PROPOSING|COMMITTING/i.test(lastError)) {
+          throw new Error(lastError);
+        }
+      }
+      if (!result.credited) {
+        throw new Error(
+          lastError ||
+            "The transaction is taking unusually long to finalize. Your GEN is safe on-chain — reopen the credits page and try claiming again in a minute.",
+        );
       }
 
       setStage("done");
@@ -149,7 +161,7 @@ export function CreditPurchaseModal({ onClose }: { onClose: () => void }) {
         caught instanceof Error ? caught.message : "Purchase did not complete.",
       );
     }
-  }, [address, connect, refresh, selected]);
+  }, [address, connect, refresh, selected, signIn]);
 
   const busy = stage === "signing" || stage === "waiting" || stage === "verifying";
 
@@ -257,34 +269,3 @@ export function CreditPurchaseModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** eth_sendTransaction wants hex quantity values. */
-function toHexWei(genWei: string): string {
-  return "0x" + BigInt(genWei).toString(16);
-}
-
-/**
- * Encodes buy_credits(string) calldata: selector 0xdd219a64
- * (keccak("buy_credits(string)")[:4], verified against viem), then
- * ABI-encoded string offset/length/data.
- */
-function toBuyCreditsCalldata(purchaseId: string): string {
-  const selector = "0xdd219a64";
-  const encoder = new TextEncoder();
-  const bytes = encoder.encode(purchaseId);
-  // word 0: offset to string data (0x20), word 1: string length, words 2+: data
-  const words: number[] = [0x20, bytes.length];
-  for (let i = 0; i < bytes.length; i += 32) {
-    let word = 0;
-    for (let j = 0; j < 32; j++) {
-      if (i + j < bytes.length) word = word * 256 + bytes[i + j];
-      else word = word * 256;
-    }
-    words.push(word);
-  }
-  return (
-    selector +
-    words
-      .map((word) => word.toString(16).padStart(64, "0"))
-      .join("")
-  );
-}

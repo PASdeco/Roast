@@ -93,7 +93,7 @@ scripts/                 deploy · verify · lint · genskill driver
 - `withdraw` / `withdraw_all` — owner-only treasury sweep.
 
 **Deployment (studionet):**
-- RoastJury: `0x30360ed47B75B981352ffae10b7A4368904df762`
+- RoastJury: `0xE8C69DAD65AEC5CFED3245464D176a4f5203C294`
 - RoastPayments: `0xF45DD9f8c8AB2239A8368272eb565dcD35dc8B3D`
 
 ## Credit economy

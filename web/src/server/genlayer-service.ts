@@ -13,6 +13,8 @@ import {
   testnetBradbury,
 } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
+import type { Hash } from "genlayer-js/types";
+import type { JuryTransactionStatus } from "@/server/jury-transaction-status";
 
 const chainMap = {
   localnet,
@@ -24,6 +26,14 @@ const chainMap = {
 export function juryConfigured(): boolean {
   return Boolean(
     process.env.ROAST_JURY_CONTRACT_ADDRESS &&
+      process.env.GENLAYER_NETWORK &&
+      process.env.BACKEND_PRIVATE_KEY,
+  );
+}
+
+export function paymentsConfigured(): boolean {
+  return Boolean(
+    process.env.ROAST_PAYMENTS_CONTRACT_ADDRESS &&
       process.env.GENLAYER_NETWORK &&
       process.env.BACKEND_PRIVATE_KEY,
   );
@@ -63,6 +73,55 @@ export interface JuryResult {
   created_at: number;
 }
 
+export interface OnChainPurchase {
+  found: boolean;
+  purchase_id: string;
+  buyer: string;
+  amount_wei: number | string;
+  created_at: number;
+}
+
+export type JuryTransaction = JuryTransactionStatus;
+
+export async function readPurchaseFromPayments(purchaseId: string): Promise<OnChainPurchase> {
+  if (!paymentsConfigured()) {
+    throw new Error("The payments contract is not configured.");
+  }
+  const result = (await getClient().readContract({
+    address: process.env.ROAST_PAYMENTS_CONTRACT_ADDRESS as `0x${string}`,
+    functionName: "get_purchase",
+    args: [purchaseId],
+  })) as unknown as OnChainPurchase;
+  return result;
+}
+
+export async function submitRoastTransaction(handle: string): Promise<Hash> {
+  if (!juryConfigured()) {
+    throw new Error("The jury is not deployed yet. GenLayer contract configuration pending.");
+  }
+  return getClient().writeContract({
+    address: process.env.ROAST_JURY_CONTRACT_ADDRESS as `0x${string}`,
+    functionName: "submit_roast",
+    args: [handle],
+    value: 0n,
+  });
+}
+
+export async function getJuryTransaction(txHash: string): Promise<JuryTransaction> {
+  const tx = await getClient().getTransaction({ hash: txHash as Hash });
+  const raw = tx as typeof tx & {
+    result_name?: string;
+    tx_execution_result_name?: string;
+  };
+  return {
+    status: String(tx.statusName ?? tx.status ?? ""),
+    consensusResult: String(tx.resultName ?? raw.result_name ?? tx.result ?? ""),
+    executionResult: String(
+      tx.txExecutionResultName ?? raw.tx_execution_result_name ?? tx.txExecutionResult ?? "",
+    ),
+  };
+}
+
 /**
  * Submits a roast to the deployed RoastJury contract using the
  * backend-funded wallet (blueprint Rule 12: users never sign for roasts).
@@ -76,15 +135,7 @@ export async function submitRoastToJury(handle: string): Promise<JuryResult> {
   }
 
   const client = getClient();
-  const contractAddress = process.env
-    .ROAST_JURY_CONTRACT_ADDRESS as `0x${string}`;
-
-  const txHash = await client.writeContract({
-    address: contractAddress,
-    functionName: "submit_roast",
-    args: [handle],
-    value: 0n,
-  });
+  const txHash = await submitRoastTransaction(handle);
 
   // The jury runs five LLM evaluations plus validator re-runs on-chain —
   // this routinely takes 5-10 minutes on studionet. Wait accordingly:

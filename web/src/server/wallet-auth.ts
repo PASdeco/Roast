@@ -11,28 +11,18 @@ import "server-only";
  */
 import { randomBytes } from "node:crypto";
 import { verifyMessage } from "viem";
+import { consumeAuthChallenge, createAuthChallenge } from "@/server/ledger";
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
-interface StoredChallenge {
-  nonce: string;
-  createdAt: number;
-}
-
-// In-memory challenge store. For multi-instance production deployments,
-// move this to the shared database or Redis.
-const challenges = new Map<string, StoredChallenge>();
-
-export function createChallenge(walletAddress: string): string {
+export async function createChallenge(walletAddress: string): Promise<string> {
   const normalized = walletAddress.toLowerCase();
   const nonce = randomBytes(16).toString("hex");
-  challenges.set(normalized, { nonce, createdAt: Date.now() });
-
-  // Opportunistic cleanup of expired challenges.
-  const now = Date.now();
-  for (const [key, value] of challenges) {
-    if (now - value.createdAt > CHALLENGE_TTL_MS) challenges.delete(key);
-  }
+  await createAuthChallenge({
+    walletAddress: normalized,
+    nonce,
+    expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+  });
 
   return `Roast My X\nWallet: ${normalized}\nNonce: ${nonce}`;
 }
@@ -43,20 +33,17 @@ export async function verifyChallenge(params: {
   signature: string;
 }): Promise<boolean> {
   const normalized = params.walletAddress.toLowerCase();
-  const stored = challenges.get(normalized);
-  if (!stored) return false;
-  challenges.delete(normalized);
-
-  if (Date.now() - stored.createdAt > CHALLENGE_TTL_MS) return false;
-  if (!params.message.includes(`Nonce: ${stored.nonce}`)) return false;
+  const match = params.message.match(/^Roast My X\nWallet: (0x[0-9a-f]{40})\nNonce: ([a-f0-9]{32})$/i);
+  if (!match || match[1].toLowerCase() !== normalized) return false;
 
   try {
-    const valid = await verifyMessage({
+      const valid = await verifyMessage({
       address: params.walletAddress as `0x${string}`,
       message: params.message,
       signature: params.signature as `0x${string}`,
     });
-    return valid === true;
+    if (!valid) return false;
+    return consumeAuthChallenge({ walletAddress: normalized, nonce: match[2] });
   } catch {
     return false;
   }

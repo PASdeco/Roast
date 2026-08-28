@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  createUserSession,
   getOrCreateUser,
   getBalance,
 } from "@/server/ledger";
@@ -47,6 +48,11 @@ export async function POST(request: Request) {
   const user = await getOrCreateUser(body.walletAddress);
   const balance = await getBalance(user.id);
   const sessionToken = randomBytes(24).toString("hex");
+  await createUserSession({
+    userId: user.id,
+    token: sessionToken,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  });
 
   const response = NextResponse.json({
     walletAddress: user.wallet_address,
@@ -54,7 +60,7 @@ export async function POST(request: Request) {
     sessionToken,
   });
 
-  response.cookies.set("roast_session", `${user.id}:${sessionToken}`, {
+  response.cookies.set("roast_session", sessionToken, {
     httpOnly: true,
     sameSite: "lax",
     path: "/",

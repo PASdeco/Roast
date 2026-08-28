@@ -5,7 +5,6 @@
  *
  * Run: node scripts/deploy-contracts.mjs
  */
-import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { createAccount, createClient } from "genlayer-js";
 import {
@@ -16,6 +15,8 @@ import {
 } from "genlayer-js/chains";
 
 const chainMap = { localnet, studionet, testnetAsimov, testnetBradbury };
+
+process.loadEnvFile(".env");
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -35,14 +36,22 @@ console.log(`deployer: ${account.address}`);
 async function deploy(name, filePath) {
   const code = readFileSync(filePath, "utf8");
   console.log(`\ndeploying ${name}…`);
-  const result = await client.deployContract({
-    code,
-    waitClose: true,
+  const txHash = await client.deployContract({ code });
+  const result = await client.waitForTransactionReceipt({
+    hash: txHash,
+    status: "ACCEPTED",
+    interval: 3_000,
+    retries: 100,
+    fullTransaction: true,
   });
   const address =
-    result?.contract_address ?? result?.data?.contract_address ?? result?.address;
-  const status = result?.status ?? result?.data?.status;
-  console.log(`${name}: address=${address} status=${status}`);
+    result?.contract_address ??
+    result?.contractAddress ??
+    result?.data?.contract_address ??
+    result?.data?.contractAddress ??
+    result?.address;
+  const status = result?.statusName ?? result?.status;
+  console.log(`${name}: tx=${txHash} address=${address} status=${status}`);
   if (!address) {
     console.error("full result:", JSON.stringify(result, null, 2).slice(0, 2000));
     throw new Error(`${name} deploy returned no address`);
@@ -50,9 +59,14 @@ async function deploy(name, filePath) {
   return { address, result };
 }
 
-const payments = await deploy("RoastPayments", "contracts/roast_payments.py");
-const jury = await deploy("RoastJury", "contracts/roast_jury.py");
+const target = process.env.DEPLOY_TARGET || "all";
+if (target !== "all" && target !== "payments" && target !== "jury") {
+  throw new Error("DEPLOY_TARGET must be all, payments, or jury.");
+}
+
+const payments = target === "jury" ? null : await deploy("RoastPayments", "contracts/roast_payments.py");
+const jury = target === "payments" ? null : await deploy("RoastJury", "contracts/roast_jury.py");
 
 console.log("\n=== ADD THESE TO .env ===");
-console.log(`ROAST_PAYMENTS_CONTRACT_ADDRESS=${payments.address}`);
-console.log(`ROAST_JURY_CONTRACT_ADDRESS=${jury.address}`);
+if (payments) console.log(`ROAST_PAYMENTS_CONTRACT_ADDRESS=${payments.address}`);
+if (jury) console.log(`ROAST_JURY_CONTRACT_ADDRESS=${jury.address}`);

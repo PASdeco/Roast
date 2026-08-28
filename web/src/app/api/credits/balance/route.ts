@@ -1,28 +1,17 @@
 import { NextResponse } from "next/server";
 import { getOrCreateUser, getBalance } from "@/server/ledger";
 import { ROAST_COST_CREDITS } from "@/server/credit-config";
-
-function userIdFromCookie(request: Request): number | null {
-  const cookie = request.headers
-    .get("cookie")
-    ?.split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith("roast_session="));
-  if (!cookie) return null;
-  const raw = cookie.split("=")[1] || "";
-  const id = Number.parseInt(raw.split(":")[0], 10);
-  return Number.isInteger(id) && id > 0 ? id : null;
-}
+import { sessionUserFromRequest } from "@/server/session";
 
 export async function GET(request: Request) {
-  const userId = userIdFromCookie(request);
-  if (!userId) {
+  const user = await sessionUserFromRequest(request);
+  if (!user) {
     return NextResponse.json(
       { authenticated: false, balance: 0, roastCost: ROAST_COST_CREDITS },
     );
   }
 
-  const balance = await getBalance(userId);
+  const balance = await getBalance(user.id);
   return NextResponse.json({
     authenticated: true,
     balance,

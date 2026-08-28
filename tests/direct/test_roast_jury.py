@@ -33,9 +33,10 @@ def judge_json(verdict="SOLID"):
     )
 
 
-def moderator_json():
+def moderator_json(overall_verdict="SOLID"):
     return json.dumps(
         {
+            "overall_verdict": overall_verdict,
             "thesis": "Strong ideas trapped inside a profile that hides them.",
             "roast": "Three niches fighting for custody of one bio.",
             "improvements": [
@@ -48,6 +49,11 @@ def moderator_json():
                     "area": "Positioning",
                     "issue": "Profile reads generic.",
                     "recommendation": "Pick the engine niche and say it out loud.",
+                },
+                {
+                    "area": "Content",
+                    "issue": "The visible positioning does not promise a clear topic.",
+                    "recommendation": "Name the computation theme readers can expect.",
                 },
             ],
             "disagreement": "",
@@ -89,7 +95,7 @@ def test_submit_roast_stores_full_result(direct_vm, direct_deploy, direct_alice)
         "profile_critic",
         "roast_judge",
     }
-    assert len(result["improvements"]) == 2
+    assert len(result["improvements"]) == 3
     assert result["thesis"] != ""
     assert result["roast"] != ""
     assert contract.get_roast_count() == 1
@@ -288,3 +294,124 @@ def test_validator_rejects_profile_presence_flip(direct_vm, direct_deploy):
     direct_vm.mock_web(r"https://x\.com/.*", {"status": 200, "body": MISSING_HTML})
 
     assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_canonical_url_divergence(direct_vm, direct_deploy):
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+
+    contract.submit_roast("ada_lovelace")
+    leader = direct_vm._captured_validators[-1][0]
+    tampered = dict(leader)
+    tampered["canonical_url"] = "https://x.com/someone_else"
+
+    assert direct_vm.run_validator(leader_result=tampered) is False
+
+
+def test_validator_rejects_profile_source_url_divergence(direct_vm, direct_deploy):
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+
+    contract.submit_roast("ada_lovelace")
+    leader = direct_vm._captured_validators[-1][0]
+    tampered = dict(leader)
+    tampered["profile"] = dict(leader["profile"])
+    tampered["profile"]["source_url"] = "https://x.com/someone_else"
+
+    assert direct_vm.run_validator(leader_result=tampered) is False
+
+
+def test_validator_rejects_evidence_divergence(direct_vm, direct_deploy):
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+
+    contract.submit_roast("ada_lovelace")
+
+    changed_html = PROFILE_HTML.replace(
+        "Building analytical engines.", "Selling unrelated courses."
+    )
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(
+        r"https://x\.com/ada_lovelace", {"status": 200, "body": changed_html}
+    )
+    direct_vm.mock_llm(r".*head moderator.*", moderator_json())
+    direct_vm.mock_llm(r".*", judge_json("SOLID"))
+
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_non_substantive_moderation(direct_vm, direct_deploy):
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+
+    contract.submit_roast("ada_lovelace")
+    leader = direct_vm._captured_validators[-1][0]
+    tampered = dict(leader)
+    tampered["moderation"] = dict(leader["moderation"])
+    tampered["moderation"]["improvements"] = []
+
+    assert direct_vm.run_validator(leader_result=tampered) is False
+
+COSMETIC_VARIANT_HTML = (
+    "<html><head>"
+    '<meta property="og:title" content="ADA LOVELACE  (@ada_lovelace) on X"/>'
+    '<meta property="og:description" content="Building ANALYTICAL engines.'
+    '   Writing about computation, poetry and punchcards."/>'
+    '<meta property="og:image" content="https://pbs.twimg.com/profile_images/ada/400x400.jpg"/>'
+    "</head><body>profile</body></html>"
+)
+
+
+def test_validator_tolerates_cosmetic_fetch_variance(direct_vm, direct_deploy):
+    """Leader and validator fetches differ ONLY by casing / whitespace /
+    avatar CDN variant: normalized evidence must match and consensus must
+    pass. Real content changes still diverge (see rejection tests above)."""
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+
+    contract.submit_roast("ada_lovelace")
+
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(
+        r"https://x\.com/ada_lovelace", {"status": 200, "body": COSMETIC_VARIANT_HTML}
+    )
+    direct_vm.mock_llm(r".*head moderator.*", moderator_json())
+    direct_vm.mock_llm(r".*Roast Judge.*", judge_json("NEEDS_WORK"))
+    direct_vm.mock_llm(r".*", judge_json("SOLID"))
+
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_accepts_case_insensitive_improvement_area(direct_vm, direct_deploy):
+    """Improvement areas may vary in case / punctuation; the substantive
+    check must still accept them instead of rejecting usable moderation."""
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+    contract.submit_roast("ada_lovelace")
+
+    leader = direct_vm._captured_validators[-1][0]
+    tampered = dict(leader)
+    tampered["moderation"] = dict(leader["moderation"])
+    improvements = [dict(item) for item in leader["moderation"]["improvements"]]
+    improvements[0]["area"] = " bio "
+    improvements[1]["area"] = "Positioning:"
+    improvements[2]["area"] = "CONTENT"
+    tampered["moderation"]["improvements"] = improvements
+
+    assert direct_vm.run_validator(leader_result=tampered) is True
+
+
+def test_validator_rejects_unknown_improvement_area(direct_vm, direct_deploy):
+    install_happy_mocks(direct_vm)
+    contract = direct_deploy("contracts/roast_jury.py")
+    contract.submit_roast("ada_lovelace")
+
+    leader = direct_vm._captured_validators[-1][0]
+    tampered = dict(leader)
+    tampered["moderation"] = dict(leader["moderation"])
+    improvements = [dict(item) for item in leader["moderation"]["improvements"]]
+    improvements[1]["area"] = "Everything Else"
+    tampered["moderation"]["improvements"] = improvements
+
+    assert direct_vm.run_validator(leader_result=tampered) is False
+
