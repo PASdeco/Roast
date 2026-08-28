@@ -697,3 +697,15 @@ export async function listActiveRoastJobIds(limit = 20): Promise<string[]> {
     return result.rows.map((row) => String(row.id));
   });
 }
+
+export async function resetRoastForRetry(requestId: string): Promise<void> {
+  await withClient(async (db) => {
+    await db.query(
+      `UPDATE roasts
+       SET execution_state = 'queued', lease_until = NULL, last_error = 'retry queued',
+           chain_tx_hash = NULL
+       WHERE id = $1 AND status = 'processing'`,
+      [requestId],
+    );
+  });
+}

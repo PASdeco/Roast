@@ -6,6 +6,7 @@ import { createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { useCredits } from "./credit-provider";
 import { useWallet } from "@/components/wallet/wallet-provider";
+import { ensureStudionet } from "@/components/wallet/network-guard";
 
 interface Package {
   id: string;
@@ -60,19 +61,36 @@ export function CreditPurchaseModal({ onClose }: { onClose: () => void }) {
       if (!provider) throw new Error("No wallet installed.");
 
       // CRITICAL SAFETY: force the wallet onto GenLayer studionet BEFORE
-      // any payment via the SDK's own connect flow (it switches or adds
-      // the chain). Prevents real ETH being sent on mainnet.
+      // any payment. Use the manual guard — it works on every wallet and
+      // does NOT require the MetaMask Flask snap. gvmClient.connect()
+      // tries to install the GenLayer snap and fails on most wallets
+      // (e.g. Rabby, Trust, plain MetaMask), which surfaced as
+      // "Network switch to GenLayer studionet failed." for you.
       const gvmClient = createClient({
         chain: studionet,
         account: wallet as `0x${string}`,
         provider,
       });
       try {
-        await gvmClient.connect("studionet");
+        await ensureStudionet();
       } catch (switchError) {
-        throw switchError instanceof Error
-          ? switchError
-          : new Error("Network switch to GenLayer studionet failed.");
+        // Surface the wallet's own reason so the user sees "You rejected"
+        // instead of a generic wall.
+        if (switchError instanceof Error) throw switchError;
+        throw new Error("Could not switch to GenLayer studionet (chainId 61999). In your wallet, add RPC https://studio.genlayer.com/api manually, then try again.");
+      }
+      // Best-effort snap install for wallets that support it — never block
+      // the purchase if the snap is unavailable. The chain is already correct.
+      try {
+        await gvmClient.connect("studionet");
+      } catch (snapError) {
+        const msg = snapError instanceof Error ? snapError.message : String(snapError);
+        if (!/snap/i.test(msg) && !/flask/i.test(msg)) {
+          // Real chain errors already handled above; snap errors are safe to ignore.
+          console.warn("[buy] snap install skipped:", msg);
+        } else {
+          console.warn("[buy] GenLayer snap not installed (optional):", msg);
+        }
       }
 
       // 1. Establish a durable, httpOnly session once. The purchase claim is

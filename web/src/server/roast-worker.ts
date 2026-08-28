@@ -6,6 +6,7 @@ import {
   recordRoastSubmission,
   refundRoast,
   releaseRoastSubmission,
+  resetRoastForRetry,
   saveRoastResult,
 } from "@/server/ledger";
 import {
@@ -72,6 +73,29 @@ export async function processRoastJob(requestId: string): Promise<void> {
   try {
     const tx = await getJuryTransaction(current.chain_tx_hash);
     if (juryTransactionFailed(tx)) {
+      // Duplicate roast is not a failure — the result already lives on-chain.
+      // Try to read the stored roast (e.g. "already roasted" revert) before
+      // refunding, so a second request for the same handle still delivers.
+      try {
+        const result = await readRoastFromJury(current.profile);
+        if (result && typeof (result as { username?: string }).username === "string") {
+          await saveRoastResult({ requestId, result });
+          return;
+        }
+      } catch {
+        // No stored roast yet — fall through to refund logic.
+      }
+      // Transient LLM / moderation hiccups deserve one retry before we give up.
+      // Studionet LLMs are nondeterministic; a single bad sample shouldn't
+      // burn the user's credits when a second try often converges.
+      const reason = `${tx.status || ""} ${tx.consensusResult || ""} ${tx.executionResult || ""}`.toUpperCase();
+      const transient = /LLM_ERROR|UNDETERMINED|CANCELED|NO_MAJORITY|MAJORITY_DISAGREE|TIMEOUT|DISAGREE/.test(reason);
+      if (transient && current.attempts < 2) {
+        // Directly reset to queued for a clean retry; releaseRoastSubmission
+        // would leave it in 'submitting' which blocks re-claim.
+        await resetRoastForRetry(requestId);
+        return;
+      }
       await refundRoast(
         requestId,
         `Jury transaction ended with ${tx.status || tx.consensusResult || tx.executionResult}.`,
