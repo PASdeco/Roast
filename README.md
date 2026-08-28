@@ -92,9 +92,10 @@ scripts/                 deploy · verify · lint · genskill driver
 - `get_purchase(id)` / `has_purchase(id)` — on-chain proof the backend verifies before awarding credits.
 - `withdraw` / `withdraw_all` — owner-only treasury sweep.
 
-**Deployment (studionet):**
-- RoastJury: `0xE8C69DAD65AEC5CFED3245464D176a4f5203C294`
+**Deployment (studionet, live):**
+- RoastJury: `0x382E939C2C9fc42F7b08888641DF6d3Ab804B70c`
 - RoastPayments: `0xF45DD9f8c8AB2239A8368272eb565dcD35dc8B3D`
+- Previous Jury (kept for history): `0xE8C69DAD65AEC5CFED3245464D176a4f5203C294`
 
 ## Credit economy
 
