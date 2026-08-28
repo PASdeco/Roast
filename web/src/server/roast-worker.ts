@@ -123,7 +123,11 @@ export async function processRoastJob(requestId: string): Promise<void> {
       statusUpper === "ACCEPTED" ||
       statusUpper === "5" ||
       statusUpper === "6";
-    if (isIntermediate && !juryTransactionFailed(tx)) {
+    // Any intermediate state means validators are still deliberating.
+    // Do NOT treat it as a failure even if consensusResult already shows
+    // NO_MAJORITY — that is an interim value before finalization. The
+    // 30-minute deadline is the hard failure boundary.
+    if (isIntermediate) {
       return; // still deliberating — keep polling, don't retry or refund
     }
     if (juryTransactionFailed(tx)) {
