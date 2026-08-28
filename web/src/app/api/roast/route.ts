@@ -1,6 +1,7 @@
 import { after, NextResponse } from "next/server";
 import {
   createUserSession,
+  findProcessingRoastForProfile,
   getOrCreateUser,
   getBalance,
   reserveRoast,
@@ -86,6 +87,35 @@ export async function POST(request: Request) {
   // Atomically reserve credits AND persist a durable processing job before
   // handing anything to asynchronous execution.
   const user = await getOrCreateUser(body.walletAddress);
+  // If the user double-clicked or refreshed while a roast for this profile
+  // is already in flight, return the existing job instead of spending twice.
+  // This was the direct cause of the "two explorer txs" you reported:
+  // two rapid POSTs created two roastIds and two chain txs for the same
+  // handle; the second inevitably reverted as "already roasted".
+  const existing = await findProcessingRoastForProfile(user.id, handle);
+  if (existing) {
+    // Re-use the in-flight job — no second spend, no second on-chain tx.
+    const sessionToken = randomBytes(24).toString("hex");
+    await createUserSession({
+      userId: user.id,
+      token: sessionToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+    const response = NextResponse.json({
+      roastId: existing.id,
+      profile: handle,
+      balance: await getBalance(user.id),
+      pollAfterSeconds: 15,
+      reused: true,
+    });
+    response.cookies.set("roast_session", sessionToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 7,
+    });
+    return response;
+  }
   const roastRequestId = randomUUID();
   const spend = await reserveRoast({
     userId: user.id,

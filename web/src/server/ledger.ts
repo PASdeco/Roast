@@ -698,6 +698,19 @@ export async function listActiveRoastJobIds(limit = 20): Promise<string[]> {
   });
 }
 
+export async function findProcessingRoastForProfile(userId: number, profile: string): Promise<StoredRoast | undefined> {
+  return withClient(async (db) => {
+    const result = await db.query(
+      `SELECT id, profile, status, thesis, created_at, result_json, failure_reason
+       FROM roasts
+       WHERE user_id = $1 AND LOWER(profile) = LOWER($2) AND status = 'processing'
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, profile],
+    );
+    return result.rows[0] as StoredRoast | undefined;
+  });
+}
+
 export async function resetRoastForRetry(requestId: string): Promise<void> {
   await withClient(async (db) => {
     await db.query(

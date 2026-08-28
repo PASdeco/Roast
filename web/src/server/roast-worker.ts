@@ -11,6 +11,7 @@ import {
 } from "@/server/ledger";
 import {
   getJuryTransaction,
+  juryHasRoast,
   readRoastFromJury,
   submitRoastTransaction,
 } from "@/server/genlayer-service";
@@ -45,14 +46,33 @@ export async function processRoastJob(requestId: string): Promise<void> {
   if (current.execution_state === "queued") {
     const claimed = await claimRoastSubmission(requestId);
     if (!claimed) return;
+    // If the handle is already roasted on-chain (e.g. a previous probe or a
+    // concurrent request succeeded), don't fire a duplicate transaction that
+    // will inevitably revert with "already roasted" and burn a second tx.
+    // Just read the stored result and complete.
+    try {
+      if (await juryHasRoast(claimed.profile)) {
+        const result = await readRoastFromJury(claimed.profile);
+        await saveRoastResult({ requestId, result });
+        return;
+      }
+    } catch {
+      // has_roast/read failures are transient — fall through to normal submit.
+    }
     try {
       const txHash = await submitRoastTransaction(claimed.profile);
       await recordRoastSubmission(requestId, txHash);
     } catch (error) {
-      await releaseRoastSubmission(
-        requestId,
-        error instanceof Error ? error.message : "Could not submit jury transaction.",
-      );
+      const msg = error instanceof Error ? error.message : String(error);
+      // "already roasted" is not a failure — the result exists, so deliver it.
+      if (/already roasted/i.test(msg)) {
+        try {
+          const result = await readRoastFromJury(claimed.profile);
+          await saveRoastResult({ requestId, result });
+          return;
+        } catch {}
+      }
+      await releaseRoastSubmission(requestId, msg);
     }
     return;
   }
@@ -72,6 +92,23 @@ export async function processRoastJob(requestId: string): Promise<void> {
 
   try {
     const tx = await getJuryTransaction(current.chain_tx_hash);
+    // Never treat intermediate consensus states as failures — they just mean
+    // the validators haven't finished. Early refunds on PENDING/PROPOSING were
+    // the exact cause of the "double transaction + adjourned" you saw:
+    // we retried while the first tx was still PENDING, which produced a
+    // duplicate "already roasted" second tx and then refunded the job even
+    // though the first tx later FINALIZED successfully.
+    const statusUpper = (tx.status || "").toString().toUpperCase();
+    const isIntermediate =
+      statusUpper === "PENDING" ||
+      statusUpper === "PROPOSING" ||
+      statusUpper === "COMMITTING" ||
+      statusUpper === "ACCEPTED" ||
+      statusUpper === "5" ||
+      statusUpper === "6";
+    if (isIntermediate && !juryTransactionFailed(tx)) {
+      return; // still deliberating — keep polling, don't retry or refund
+    }
     if (juryTransactionFailed(tx)) {
       // Duplicate roast is not a failure — the result already lives on-chain.
       // Try to read the stored roast (e.g. "already roasted" revert) before
