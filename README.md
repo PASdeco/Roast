@@ -95,7 +95,7 @@ scripts/                 deploy · verify · lint · genskill driver
 **Deployment (studionet, live):**
 - RoastJury: `0x382E939C2C9fc42F7b08888641DF6d3Ab804B70c`
 - RoastPayments: `0xF45DD9f8c8AB2239A8368272eb565dcD35dc8B3D`
-- Previous Jury (kept for history): `0xE8C69DAD65AEC5CFED3245464D176a4f5203C294`
+- Previous Jury (kept for history): `0x30360ed47B75B981352ffae10b7A4368904df762`
 
 ## Credit economy
 
